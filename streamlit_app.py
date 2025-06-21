@@ -9,8 +9,46 @@ from ta.trend import MACD, EMAIndicator, SMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
 
-# App Title
-st.title("📈 Nifty 50 Stock Price Movement Predictor")
+# Center only the image
+col1, col2, col3 = st.columns([1, 2, 1])
+with col2:
+    st.image("assets/FiscalWaveOriginal.png", width=200)
+
+# Animated red-green gradient title
+st.markdown(
+    """
+    <style>
+    .animated-gradient {
+        font-size: 30px;
+        font-weight: bold;
+        background: linear-gradient(
+            270deg,
+            #FF6666,  /* Light red */
+            #66FF66,  /* Light green */
+            #FF0000,  /* Bright red */
+            #00CC00,  /* Bright green */
+            #FF6666
+        );
+        background-size: 1000% 100%;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: gradientMove 5s ease infinite;
+    }
+
+    @keyframes gradientMove {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+    </style>
+
+    <h2 class='animated-gradient'>
+        AI-Powered Nifty 50 Trend Predictor
+    </h2>
+    """,
+    unsafe_allow_html=True
+)
+
 
 @st.cache_resource
 def load_model():
