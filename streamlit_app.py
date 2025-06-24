@@ -115,7 +115,7 @@ def get_nifty50_performance_fallback():
                 continue
                 
             prev_close = data['Close'].iloc[-2]
-            current_close = data['Close'].ililoc[-1]
+            current_close = data['Close'].iloc[-1]
             pct_change = round(((current_close - prev_close) / prev_close * 100), 2)
             performance[ticker.split('.')[0]] = pct_change
             
@@ -288,10 +288,63 @@ def create_performance_marquee(performance_data):
     marquee_content = " 🔔 NIFTY 50 LIVE &nbsp;&nbsp;|&nbsp;&nbsp; " + " &nbsp;&nbsp;|&nbsp;&nbsp; ".join(ticker_items)
     
     return marquee_content
+
+def create_top_performers(performance_data, top_n=5):
+    """Create top gainers and losers sections"""
+    # Sort stocks by performance
+    sorted_stocks = sorted(performance_data.items(), key=lambda x: x[1], reverse=True)
+    
+    # Get top gainers and losers
+    top_gainers = sorted_stocks[:top_n]
+    top_losers = sorted_stocks[-top_n:][::-1]  # Reverse to show worst first
+    
+    return top_gainers, top_losers
+
+def render_performance_sections(top_gainers, top_losers):
+    """Render top gainers and losers in columns"""
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown(
+            f"""
+            <div style="background-color:#e6f4ea; padding:10px; border-radius:10px; margin-bottom:15px;">
+                <h4 style="color:#2e8b57; margin-bottom:10px; text-align:center;">🏆 Top Gainers</h4>
+                <div style="display: flex; flex-direction: column; gap: 5px;">
+                    {''.join([
+                        f'<div style="display: flex; justify-content: space-between; padding: 3px 10px; border-radius: 5px; background-color: rgba(46, 139, 87, 0.1);">'
+                        f'<span style="font-weight: bold;">{stock}</span>'
+                        f'<span style="color: #2e8b57;">↑ {change:.2f}%</span>'
+                        f'</div>'
+                        for stock, change in top_gainers
+                    ])}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    
+    with col2:
+        st.markdown(
+            f"""
+            <div style="background-color:#fce8e6; padding:10px; border-radius:10px; margin-bottom:15px;">
+                <h4 style="color:#d93025; margin-bottom:10px; text-align:center;">💣 Top Losers</h4>
+                <div style="display: flex; flex-direction: column; gap: 5px;">
+                    {''.join([
+                        f'<div style="display: flex; justify-content: space-between; padding: 3px 10px; border-radius: 5px; background-color: rgba(217, 48, 37, 0.1);">'
+                        f'<span style="font-weight: bold;">{stock}</span>'
+                        f'<span style="color: #d93025;">↓ {abs(change):.2f}%</span>'
+                        f'</div>'
+                        for stock, change in top_losers
+                    ])}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 	
 # ---------- UI COMPONENTS ----------
 def render_header(performance_data):
-    """Render application header with logo and ticker"""
+    """Render application header with logo, ticker, and performance sections"""
     logo = load_logo()
     marquee_content = create_performance_marquee(performance_data)
     
@@ -330,7 +383,7 @@ def render_header(performance_data):
             unsafe_allow_html=True
         )
     
-    # Animated title
+    # Animated title - MOVED ABOVE PERFORMANCE SECTIONS
     st.markdown(
         """
         <style>
@@ -359,12 +412,16 @@ def render_header(performance_data):
         }
         </style>
 
-        <h2 class='animated-gradient' style='text-align: center;'>
-            AI-Powered Nifty 50 Price Movement Predictor
+        <h2 class='animated-gradient' style='text-align: center; margin-top: 10px; margin-bottom: 20px;'>
+            FiscalWave : Predicting Nifty 50 Price Movement. Powered by AI.
         </h2>
         """,
         unsafe_allow_html=True
     )
+    
+    # Add Top Gainers and Losers sections BELOW the header
+    top_gainers, top_losers = create_top_performers(performance_data)
+    render_performance_sections(top_gainers, top_losers)
 
 def render_prediction_ui(pred, confidence):
     """Render prediction result UI with proper boolean handling"""
@@ -585,6 +642,14 @@ def main():
         .stTabs [aria-selected="true"] {
             background-color: #e6f4ea;
             font-weight: bold;
+        }
+        
+        /* Top performers styling */
+        .top-gainer-item, .top-loser-item {
+            transition: all 0.3s ease;
+        }
+        .top-gainer-item:hover, .top-loser-item:hover {
+            transform: scale(1.02);
         }
         </style>
         """,
