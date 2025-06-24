@@ -6,16 +6,18 @@ from datetime import datetime, timedelta
 import os
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
+import numpy as np
 
 from ta.trend import MACD, EMAIndicator, SMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
 
-# Constants - Using GENERIC feature names
+# Enhanced feature set
 FEATURE_COLS = [
     'Open', 'High', 'Low', 'Close', 'Volume',
     'macd', 'rsi', 'bb_bbm', 'bb_bbh', 'bb_bbl',
-    'ema_20', 'sma_20', 'return_1d', 'return_2d', 'volatility_5d'
+    'ema_20', 'sma_20', 'return_1d', 'return_2d', 'volatility_5d',
+    'price_bb_diff', 'macd_hist'
 ]
 
 def engineer_features(df):
@@ -25,7 +27,7 @@ def engineer_features(df):
     
     # Create copy and force standard column names
     df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
-    df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']  # CRITICAL: Force standard names
+    df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
     df.dropna(inplace=True)
     
     if len(df) < 30:  # Need enough data for indicators
@@ -34,16 +36,18 @@ def engineer_features(df):
     close_series = df["Close"].astype(float).squeeze()
     
     # Technical indicators
-    df["macd"] = MACD(close=close_series).macd_diff()
+    macd = MACD(close=close_series)
+    df["macd"] = macd.macd_diff()
+    df["macd_signal"] = macd.macd_signal()
+    df["macd_hist"] = df["macd"] - df["macd_signal"]
+    
     df["rsi"] = RSIIndicator(close=close_series).rsi()
     
-    # Bollinger Bands
     bb = BollingerBands(close=close_series)
     df["bb_bbm"] = bb.bollinger_mavg()
     df["bb_bbh"] = bb.bollinger_hband()
     df["bb_bbl"] = bb.bollinger_lband()
     
-    # Moving Averages
     df["ema_20"] = EMAIndicator(close=close_series, window=20).ema_indicator()
     df["sma_20"] = SMAIndicator(close=close_series, window=20).sma_indicator()
     
@@ -51,6 +55,9 @@ def engineer_features(df):
     df["return_1d"] = df["Close"].pct_change()
     df["return_2d"] = df["Close"].pct_change(2)
     df["volatility_5d"] = df["Close"].rolling(window=5).std()
+    
+    # Additional features
+    df["price_bb_diff"] = (df["Close"] - df["bb_bbl"]) / (df["bb_bbh"] - df["bb_bbl"])
     
     # Target
     df["Target"] = (df["Close"].shift(-1) > df["Close"]).astype(int)
@@ -110,11 +117,14 @@ if __name__ == "__main__":
         use_label_encoder=False,
         eval_metric="logloss",
         random_state=42,
-        n_estimators=300,
-        max_depth=7,
+        n_estimators=500,
+        max_depth=8,
         learning_rate=0.05,
         subsample=0.8,
-        colsample_bytree=0.8
+        colsample_bytree=0.8,
+        gamma=0.1,
+        reg_alpha=0.1,
+        reg_lambda=1
     )
     
     # Train-test split
@@ -128,6 +138,15 @@ if __name__ == "__main__":
     test_score = model.score(X_test, y_test)
     print(f"\nTraining Accuracy: {train_score:.4f}")
     print(f"Test Accuracy: {test_score:.4f}")
+    
+    # Feature importance
+    feature_importance = pd.DataFrame({
+        'Feature': FEATURE_COLS,
+        'Importance': model.feature_importances_
+    }).sort_values('Importance', ascending=False)
+    
+    print("\nFeature Importance:")
+    print(feature_importance)
     
     # Save model
     os.makedirs("models", exist_ok=True)
