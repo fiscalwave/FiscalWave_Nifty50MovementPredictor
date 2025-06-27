@@ -11,14 +11,16 @@ from ta.volatility import BollingerBands
 import requests
 import os
 from PIL import Image
-import concurrent.futures
 import time
+import json
+import toml
 
 # Set page config
 st.set_page_config(
     page_title="FiscalWave - AI Stock Predictor",
     page_icon="📈",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # ---------- CONSTANTS ----------
@@ -46,14 +48,30 @@ TIME_OPTIONS = {
 
 # ---------- UTILITY FUNCTIONS ----------
 def to_scalar(value):
-    """Convert any value to a scalar (non-Series) type"""
-    if isinstance(value, (pd.Series, np.ndarray)):
-        if value.size == 1:
-            return value.item()  # Convert single-element array to scalar
-        else:
-            return value.iloc[0] if isinstance(value, pd.Series) else value[0]
-    elif hasattr(value, 'item'):
-        return value.item()  # Handle numpy scalars
+    """Convert any value to a scalar (non-Series) type with robust handling"""
+    if value is None:
+        return None
+    
+    # Handle pandas Series
+    if isinstance(value, pd.Series):
+        if value.empty:
+            return None
+        return value.iloc[0]  # Return first element
+    
+    # Handle numpy arrays
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return None
+        return value.item()  # Convert to Python scalar
+    
+    # Handle numpy scalars
+    if hasattr(value, 'item'):
+        return value.item()
+    
+    # Handle Python sequences
+    if isinstance(value, (list, tuple)):
+        return value[0] if len(value) > 0 else None
+    
     return value  # Return as-is if already scalar
 
 def safe_compare(value, op, threshold):
@@ -211,45 +229,304 @@ def engineer_features(df):
         st.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
+# ========== FIXED NEWS FUNCTIONS ==========
+@st.cache_data(ttl=3600, show_spinner="Fetching market news...")  # Cache for 1 hour
 def get_stock_news(stock_name):
-    """Fetch news articles with error handling"""
+    """Enhanced news fetching with multiple sources and fallbacks"""
     try:
-        api_key = st.secrets.get("NEWS_API_KEY", "d8a5b8f5d1c84c7f9f7f1b7e9d0e4b7e")
-        url = f"https://newsapi.org/v2/everything?q={stock_name}&apiKey={api_key}&pageSize=5"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        news_data = response.json()
-        return news_data.get('articles', [])
-    except Exception:
-        return []
+        # Use the actual stock name without .NS suffix
+        query_name = stock_name.split('.')[0] if '.' in stock_name else stock_name
+        
+        # Get API key from secrets - simplified approach
+        api_key = None
+        try:
+            # Try accessing secrets directly without section
+            api_key = st.secrets.get("NEWS_API_KEY", st.secrets.get("news_api_key"))
+        except Exception as e:
+            st.warning(f"Secrets access issue: {str(e)}")
+        
+        if not api_key:
+            return {
+                "status": "error",
+                "message": "News API key not configured. Please add your API key to secrets.toml"
+            }
+        
+        # Try different endpoints and parameters
+        endpoints = [
+            f"https://newsapi.org/v2/everything?q={query_name}&apiKey={api_key}&pageSize=5&language=en",
+            f"https://newsapi.org/v2/top-headlines?q={query_name}&apiKey={api_key}&pageSize=5&language=en&category=business",
+            f"https://newsapi.org/v2/everything?q=NSE:{query_name}&apiKey={api_key}&pageSize=5&language=en"
+        ]
+        
+        for url in endpoints:
+            try:
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                news_data = response.json()
+                
+                if news_data.get('status') == 'ok' and news_data.get('totalResults', 0) > 0:
+                    return {
+                        "status": "success",
+                        "articles": news_data.get('articles', [])
+                    }
+            except requests.exceptions.RequestException as e:
+                print(f"News API error ({url}): {str(e)}")
+                continue  # Try next endpoint
+        
+        return {"status": "no_results", "message": "No news found for this stock"}
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Error fetching news: {str(e)}"
+        }
+
+def format_news_date(raw_date):
+    """Safely format news date with fallback"""
+    try:
+        if not raw_date:
+            return "Date not available"
+        date_obj = datetime.strptime(raw_date, "%Y-%m-%dT%H:%M:%SZ")
+        return date_obj.strftime("%b %d, %Y %I:%M %p")
+    except:
+        return raw_date[:10] if raw_date else "Date not available"
+
+def render_news_section(news_result, selected_stock):
+    """Render news section with improved UI and error handling"""
+    st.subheader(f"📰 Latest News for {selected_stock}")
+    
+    if news_result["status"] == "success":
+        articles = news_result["articles"]
+        for i, article in enumerate(articles):
+            with st.expander(f"{i+1}. {article.get('title', 'No title available')}", expanded=(i==0)):
+                col1, col2 = st.columns([1, 3])
+                
+                with col1:
+                    if article.get('urlToImage'):
+                        st.image(article['urlToImage'], width=200)
+                    else:
+                        st.image("https://via.placeholder.com/200x100?text=No+Image", width=200)
+                
+                with col2:
+                    st.markdown(f"**Source:** {article.get('source', {}).get('name', 'Unknown')}")
+                    st.markdown(f"**Published:** {format_news_date(article.get('publishedAt'))}")
+                    st.markdown(f"**Description:** {article.get('description', 'No description available')}")
+                    st.markdown(f"[Read full article]({article.get('url', '#')})")
+        
+        # Add refresh button
+        if st.button("🔄 Refresh News", key="refresh_news"):
+            st.cache_data.clear()
+    
+    elif news_result["status"] == "no_results":
+        st.info("📭 No recent news articles found. Try again later.")
+        st.markdown("""
+        <div style="background-color:#e8f4f8; padding:15px; border-radius:10px; margin-top:20px;">
+            <h4>💡 Why no news?</h4>
+            <ul>
+                <li>Market closed hours may limit news availability</li>
+                <li>Try a larger, more active company</li>
+                <li>News API might be temporarily unavailable</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    else:  # Error case
+        st.error(f"❌ {news_result['message']}")
+        
+        # Improved instructions with TOML examples
+        st.markdown("""
+        <div style="background-color:#fce8e6; padding:15px; border-radius:10px; margin-top:20px;">
+            <h4>🔑 API Key Setup Instructions</h4>
+            <p>To enable news features:</p>
+            
+            <h5>Option 1: Simple Format (Recommended)</h5>
+            <p>Create a <code>secrets.toml</code> file with just your key:</p>
+            <pre style="background:#f0f0f0;padding:10px;border-radius:5px;">
+NEWS_API_KEY = "your_api_key_here"</pre>
+            
+            <h5>Option 2: Section Format</h5>
+            <p>If you prefer sections, use this format:</p>
+            <pre style="background:#f0f0f0;padding:10px;border-radius:5px;">
+[secrets]
+NEWS_API_KEY = "your_api_key_here"</pre>
+            
+            <p>Valid paths for secrets.toml:</p>
+            <ul>
+                <li><code>/home/vscode/.streamlit/secrets.toml</code></li>
+                <li><code>/workspaces/blank-app/.streamlit/secrets.toml</code></li>
+                <li><code>~/.streamlit/secrets.toml</code> (for local environments)</li>
+            </ul>
+            
+            <p>Get a free API key from <a href="https://newsapi.org/register" target="_blank">NewsAPI.org</a></p>
+            
+            <h5>Common Fixes:</h5>
+            <ul>
+                <li>Remove any extra spaces before keys</li>
+                <li>Ensure quotes are straight quotes (") not curly quotes</li>
+                <li>Don't include brackets or special characters in the key</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # TOML validation helper
+        with st.expander("Validate your TOML syntax"):
+            st.write("Paste your secrets.toml content here to validate:")
+            toml_content = st.text_area("TOML Content", height=150)
+            
+            if st.button("Validate Syntax"):
+                try:
+                    parsed = toml.loads(toml_content)
+                    valid_keys = [k for k in parsed.keys() if k in ["secrets", "NEWS_API_KEY", "news_api_key"]]
+                    if valid_keys:
+                        st.success("✅ Valid TOML syntax!")
+                        st.json(parsed)
+                    else:
+                        st.warning("⚠️ Syntax is valid but no recognized keys found")
+                except Exception as e:
+                    st.error(f"❌ Invalid TOML: {str(e)}")
+
+# ========== ENHANCED HISTORICAL DATA ==========
+def render_historical_data(df, selected_stock):
+    """Render historical data section with interactive features"""
+    st.subheader("📊 Historical Price Data")
+    
+    if df.empty:
+        st.info("📭 No historical data available for this time period")
+        st.markdown("""
+        <div style="background-color:#e8f4f8; padding:15px; border-radius:10px; margin-top:20px;">
+            <h4>💡 Tips for historical data:</h4>
+            <ul>
+                <li>Try a longer time period (1 Year or Max)</li>
+                <li>Check if the stock trades on Indian markets</li>
+                <li>Verify the stock symbol is correct</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    # Add date range selector
+    min_date = df.index.min().to_pydatetime()
+    max_date = df.index.max().to_pydatetime()
+    
+    if min_date != max_date:
+        date_range = st.slider(
+            "Select date range:",
+            min_value=min_date,
+            max_value=max_date,
+            value=(min_date, max_date),
+            format="YYYY-MM-DD"
+        )
+        
+        # Filter data based on selected range
+        filtered_df = df.loc[date_range[0]:date_range[1]]
+    else:
+        filtered_df = df
+    
+    # Display data with sorting and search
+    st.dataframe(
+        filtered_df[["Open", "High", "Low", "Close", "Volume"]].style.format({
+            "Open": "{:.2f}",
+            "High": "{:.2f}",
+            "Low": "{:.2f}",
+            "Close": "{:.2f}",
+            "Volume": "{:,.0f}"
+        }).background_gradient(cmap="Blues", subset=["Close"])
+        .set_properties(**{'text-align': 'center'}),
+        height=400
+    )
+    
+    # Add chart visualization
+    st.subheader("Price Trend")
+    chart_type = st.radio("Chart Type:", ["Line", "Candlestick"], horizontal=True)
+    
+    if chart_type == "Line":
+        st.line_chart(filtered_df["Close"])
+    else:
+        # Create candlestick chart
+        candlestick = filtered_df[["Open", "High", "Low", "Close"]].copy()
+        candlestick.columns = ["open", "high", "low", "close"]
+        st.vega_lite_chart(candlestick, {
+            "mark": {
+                "type": "candlestick",
+                "clip": True,
+                "color": "#4f8bf9"
+            },
+            "encoding": {
+                "x": {"field": "index", "type": "temporal", "title": "Date"},
+                "y": {
+                    "field": "close",
+                    "type": "quantitative",
+                    "title": "Price",
+                    "scale": {"zero": False}
+                },
+                "color": {
+                    "condition": {
+                        "test": "datum.open <= datum.close",
+                        "value": "#2ca02c"  # Green for up
+                    },
+                    "value": "#d62728"  # Red for down
+                }
+            },
+            "width": "container"
+        }, use_container_width=True)
+    
+    # Add download options
+    col1, col2 = st.columns(2)
+    with col1:
+        csv = filtered_df.to_csv().encode('utf-8')
+        st.download_button(
+            label="📥 Download as CSV",
+            data=csv,
+            file_name=f"{selected_stock}_historical_data.csv",
+            mime="text/csv"
+        )
+    
+    with col2:
+        json_data = filtered_df.to_json(orient="records")
+        st.download_button(
+            label="📥 Download as JSON",
+            data=json_data,
+            file_name=f"{selected_stock}_historical_data.json",
+            mime="application/json"
+        )
+
+# ========== END OF ENHANCED SECTIONS ==========
 
 def get_technical_insight(rsi, macd_hist, price, bb_bbl, bb_bbh):
-    """Generate technical insights with safety checks"""
+    """Generate technical insights with enhanced safety checks"""
     insights = []
     
     try:
-        # Safely compare values using our helper function
-        if safe_compare(rsi, 'gt', 70):
-            insights.append("RSI > 70 (Overbought)")
-        elif safe_compare(rsi, 'lt', 30):
-            insights.append("RSI < 30 (Oversold)")
+        # Convert all values to scalars first
+        rsi = to_scalar(rsi)
+        macd_hist = to_scalar(macd_hist)
+        price = to_scalar(price)
+        bb_bbl = to_scalar(bb_bbl)
+        bb_bbh = to_scalar(bb_bbh)
         
-        if safe_compare(macd_hist, 'gt', 0):
-            insights.append("MACD Bullish")
-        elif safe_compare(macd_hist, 'lt', 0) or safe_compare(macd_hist, 'eq', 0):
-            insights.append("MACD Bearish")
+        # RSI Insights
+        if rsi is not None:
+            if rsi > 70:
+                insights.append("RSI > 70 (Overbought)")
+            elif rsi < 30:
+                insights.append("RSI < 30 (Oversold)")
         
-        if (safe_compare(price, 'lt', bb_bbl) and 
-            safe_compare(bb_bbl, 'gt', 0) and 
-            safe_compare(bb_bbh, 'gt', 0)):
-            insights.append("Price below Lower Bollinger Band (Oversold)")
-        elif (safe_compare(price, 'gt', bb_bbh) and 
-              safe_compare(bb_bbl, 'gt', 0) and 
-              safe_compare(bb_bbh, 'gt', 0)):
-            insights.append("Price above Upper Bollinger Band (Overbought)")
-            
+        # MACD Insights
+        if macd_hist is not None:
+            if macd_hist > 0:
+                insights.append("MACD Bullish")
+            else:
+                insights.append("MACD Bearish")
+        
+        # Bollinger Bands Insights
+        if all(v is not None for v in [price, bb_bbl, bb_bbh]):
+            if price < bb_bbl:
+                insights.append("Price below Lower Bollinger Band (Oversold)")
+            elif price > bb_bbh:
+                insights.append("Price above Upper Bollinger Band (Overbought)")
+                
     except Exception as e:
-        st.warning(f"Couldn't generate some technical insights: {str(e)}")
+        print(f"Insight generation error: {str(e)}")
     
     return insights
 
@@ -348,33 +625,60 @@ def render_header(performance_data):
     logo = load_logo()
     marquee_content = create_performance_marquee(performance_data)
     
-    if logo:
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            st.image(logo, width=200)
-        with col2:
+    # Create a container for the header
+    header_container = st.container()
+    
+    with header_container:
+        # New row: Logo and Title
+        col_title, col_logo = st.columns([4, 1])
+        
+        with col_title:
+            # Moved title to this position
             st.markdown(
-                f"""
-                <div style="width: 100%; overflow: hidden; white-space: nowrap;">
-                    <marquee behavior="scroll" direction="left" scrollamount="8" style="font-weight:bold;">
-                        {marquee_content}
-                    </marquee>
-                </div>
+                """
+                <style>
+                .animated-gradient {
+                    font-size: 30px;
+                    font-weight: bold;
+                    background: linear-gradient(
+                        270deg,
+                        #FF6666,
+                        #66FF66,
+                        #FF0000,
+                        #00CC00,
+                        #FF6666
+                    );
+                    background-size: 1000% 100%;
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    animation: gradientMove 5s ease infinite;
+                    white-space: nowrap;
+                }
+
+                @keyframes gradientMove {
+                    0% { background-position: 0% 50%; }
+                    50% { background-position: 100% 50%; }
+                    100% { background-position: 0% 50%; }
+                }
+                </style>
+
+                <h2 class='animated-gradient' style='text-align: center; margin-top: 0; margin-bottom: 0;'>
+                    FiscalWave: AI-Powered Nifty 50 Price Predictor
+                </h2>
                 """,
                 unsafe_allow_html=True
             )
-    else:
-        st.markdown(
-            """
-            <div style="text-align: center;">
-                <h1>FiscalWave</h1>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        
+        with col_logo:
+            if logo:
+                st.image(logo, width=150)
+            else:
+                st.empty()
+        
+        # Marquee row (below title and logo)
         st.markdown(
             f"""
-            <div style="width: 100%; overflow: hidden; white-space: nowrap;">
+            <div style="width: 100%; overflow: hidden; white-space: nowrap; margin-top: 10px;">
                 <marquee behavior="scroll" direction="left" scrollamount="8" style="font-weight:bold;">
                     {marquee_content}
                 </marquee>
@@ -383,45 +687,15 @@ def render_header(performance_data):
             unsafe_allow_html=True
         )
     
-    # Animated title - MOVED ABOVE PERFORMANCE SECTIONS
-    st.markdown(
-        """
-        <style>
-        .animated-gradient {
-            font-size: 30px;
-            font-weight: bold;
-            background: linear-gradient(
-                270deg,
-                #FF6666,
-                #66FF66,
-                #FF0000,
-                #00CC00,
-                #FF6666
-            );
-            background-size: 1000% 100%;
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            animation: gradientMove 5s ease infinite;
-            white-space: nowrap;
-        }
-
-        @keyframes gradientMove {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
-        }
-        </style>
-
-        <h2 class='animated-gradient' style='text-align: center; margin-top: 10px; margin-bottom: 20px;'>
-            FiscalWave : Predicting Nifty 50 Price Movement. Powered by AI.
-        </h2>
-        """,
-        unsafe_allow_html=True
-    )
+    # Add spacing
+    st.write("")
     
     # Add Top Gainers and Losers sections BELOW the header
     top_gainers, top_losers = create_top_performers(performance_data)
     render_performance_sections(top_gainers, top_losers)
+    
+    # Add spacing
+    st.write("")
 
 def render_prediction_ui(pred, confidence):
     """Render prediction result UI with proper boolean handling"""
@@ -481,26 +755,38 @@ def render_technical_metrics(latest):
     
     with metric_col3:
         try:
-            close = to_scalar(latest.get('Close', None))
-            bb_bbl = to_scalar(latest.get('bb_bbl', None))
-            bb_bbh = to_scalar(latest.get('bb_bbh', None))
+            close = to_scalar(latest.get('Close'))
+            bb_bbl = to_scalar(latest.get('bb_bbl'))
+            bb_bbh = to_scalar(latest.get('bb_bbh'))
             
-            if all(x is not None for x in [close, bb_bbl, bb_bbh]) and (bb_bbh - bb_bbl) != 0:
+            # Check for valid values before calculation
+            if None not in (close, bb_bbl, bb_bbh) and (bb_bbh - bb_bbl) != 0:
                 bb_position = ((close - bb_bbl) / (bb_bbh - bb_bbl)) * 100
                 position = 'Upper Band' if bb_position > 95 else 'Lower Band' if bb_position < 5 else 'Middle Range'
             else:
                 bb_position = None
                 position = 'N/A'
-        except (ZeroDivisionError, KeyError, TypeError):
-            bb_position = None
-            position = 'N/A'
-        st.markdown(f"""
-        <div class='metric-card bb-card'>
-            <h4>Bollinger Bands</h4>
-            <h3>{safe_format(bb_position, '.1f')}%</h3>
-            <p>{position}</p>
-        </div>
-        """, unsafe_allow_html=True)
+                
+            # Format display values
+            bb_position_display = safe_format(bb_position, '.1f')
+            
+            st.markdown(f"""
+            <div class='metric-card bb-card'>
+                <h4>Bollinger Bands</h4>
+                <h3>{bb_position_display}%</h3>
+                <p>{position}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        except Exception as e:
+            print(f"Bollinger Band error: {str(e)}")
+            st.markdown(f"""
+            <div class='metric-card bb-card'>
+                <h4>Bollinger Bands</h4>
+                <h3>N/A</h3>
+                <p>Error</p>
+            </div>
+            """, unsafe_allow_html=True)
 
 def render_technical_charts(df, df_features, stock_name):
     """Render technical charts with improved styling"""
@@ -651,6 +937,26 @@ def main():
         .top-gainer-item:hover, .top-loser-item:hover {
             transform: scale(1.02);
         }
+        
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
         </style>
         """,
         unsafe_allow_html=True
@@ -659,11 +965,6 @@ def main():
     # Load performance data
     with st.spinner("Loading market data..."):
         performance_data = get_nifty50_performance()
-        
-        # Debug check
-        #sample = list(performance_data.items())[:5]
-        #st.write(f"Sample data: {sample}")  # This will show in your app for debugging
-        #print(f"Performance data sample: {sample}")  # This will show in logs
         
         if len(set(performance_data.values())) == 1:
             st.warning("Performance data appears identical for all stocks - may indicate stale data")
@@ -736,10 +1037,6 @@ def main():
             latest.get('bb_bbh', None)
         )
         
-        # Get market news
-        with st.spinner("Fetching market news..."):
-            news_articles = get_stock_news(selected_stock)
-        
         # Main layout
         col1, col2 = st.columns([1, 1])
         
@@ -802,7 +1099,7 @@ def main():
                 fig = render_technical_charts(df, df_features, selected_stock)
                 st.pyplot(fig)
         
-        # Tabs for additional information
+        # Tabs for additional information - FIXED SECTION
         tab1, tab2, tab3 = st.tabs(["Technical Details", "Market News", "Historical Data"])
         
         with tab1:
@@ -828,30 +1125,13 @@ def main():
                 st.write("Price position in Bollinger Bands: N/A")
         
         with tab2:
-            st.subheader(f"Latest News for {selected_stock}")
-            if news_articles:
-                for article in news_articles:
-                    with st.container():
-                        st.markdown(f"**{article.get('title', 'No title')}**")
-                        st.caption(f"Published: {article.get('publishedAt', '')[:10]} | Source: {article.get('source', {}).get('name', 'Unknown')}")
-                        st.write(article.get('description', 'No description available'))
-                        st.markdown(f"[Read more]({article.get('url', '#')})")
-                        st.divider()
-            else:
-                st.info("No recent news articles found")
+            # Get market news
+            news_result = get_stock_news(selected_stock)
+            render_news_section(news_result, selected_stock)
         
         with tab3:
-            st.subheader("Recent Price Data")
-            if not df.empty:
-                display_df = df.tail(10)[["Open", "High", "Low", "Close", "Volume"]].copy()
-                display_df["Open"] = display_df["Open"].apply(lambda x: safe_format(x, '.2f'))
-                display_df["High"] = display_df["High"].apply(lambda x: safe_format(x, '.2f'))
-                display_df["Low"] = display_df["Low"].apply(lambda x: safe_format(x, '.2f'))
-                display_df["Close"] = display_df["Close"].apply(lambda x: safe_format(x, '.2f'))
-                display_df["Volume"] = display_df["Volume"].apply(lambda x: safe_format(x, ',.0f'))
-                st.dataframe(display_df, height=400)
-            else:
-                st.info("No historical data available")
+            # Render historical data
+            render_historical_data(df, selected_stock)
     
     except Exception as e:
         st.error("An unexpected error occurred. Please try again or select a different stock.")
