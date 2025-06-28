@@ -437,40 +437,75 @@ def render_historical_data(df, selected_stock):
     
     # Add chart visualization
     st.subheader("Price Trend")
+    
+    # Add chart type selection
     chart_type = st.radio("Chart Type:", ["Line", "Candlestick"], horizontal=True)
     
+    # Create a copy of the filtered data and reset index
+    plot_df = filtered_df.copy().reset_index()
+    plot_df['Date'] = plot_df['Date'].dt.strftime('%Y-%m-%d')
+    
     if chart_type == "Line":
-        st.line_chart(filtered_df["Close"])
-    else:
-        # Create candlestick chart
-        candlestick = filtered_df[["Open", "High", "Low", "Close"]].copy()
-        candlestick.columns = ["open", "high", "low", "close"]
-        st.vega_lite_chart(candlestick, {
-            "mark": {
-                "type": "candlestick",
-                "clip": True,
-                "color": "#4f8bf9"
-            },
-            "encoding": {
-                "x": {"field": "index", "type": "temporal", "title": "Date"},
-                "y": {
-                    "field": "close",
-                    "type": "quantitative",
-                    "title": "Price",
-                    "scale": {"zero": False}
-                },
-                "color": {
-                    "condition": {
-                        "test": "datum.open <= datum.close",
-                        "value": "#2ca02c"  # Green for up
-                    },
-                    "value": "#d62728"  # Red for down
-                }
-            },
-            "width": "container"
-        }, use_container_width=True)
+        # Create line chart using Altair
+        import altair as alt
+        
+        line_chart = alt.Chart(plot_df).mark_line(
+            color='#1f77b4', 
+            size=3
+        ).encode(
+            x=alt.X('Date:T', title='Date'),
+            y=alt.Y('Close:Q', title='Price (₹)'),
+            tooltip=['Date:T', 'Close:Q']
+        ).properties(
+            title=f"{selected_stock} Price Trend",
+            width=800,
+            height=400
+        ).interactive()
+        
+        st.altair_chart(line_chart, use_container_width=True)
+        
+    else:  # Candlestick chart
+        # Create candlestick chart using Altair
+        import altair as alt
+        
+        # Create base chart
+        base = alt.Chart(plot_df).encode(
+            x='Date:T',
+            color=alt.condition(
+                "datum.Open <= datum.Close",
+                alt.value("#06982d"),  # Green for up
+                alt.value("#ae1325")   # Red for down
+            )
+        )
+        
+        # Create candlesticks
+        rule = base.mark_rule().encode(
+            y='Low:Q',
+            y2='High:Q'
+        )
+        
+        bar = base.mark_bar().encode(
+            y='Open:Q',
+            y2='Close:Q'
+        )
+        
+        # Combine and configure
+        chart = (rule + bar).properties(
+            title=f"{selected_stock} Candlestick Chart",
+            width=800,
+            height=400
+        ).configure_axis(
+            grid=False
+        ).configure_view(
+            strokeWidth=0
+        )
+        
+        st.altair_chart(chart, use_container_width=True)
     
     # Add download options
+    st.markdown("---")
+    st.subheader("Download Data")
+    
     col1, col2 = st.columns(2)
     with col1:
         csv = filtered_df.to_csv().encode('utf-8')
@@ -489,7 +524,7 @@ def render_historical_data(df, selected_stock):
             file_name=f"{selected_stock}_historical_data.json",
             mime="application/json"
         )
-
+		
 # ========== END OF ENHANCED SECTIONS ==========
 
 def get_technical_insight(rsi, macd_hist, price, bb_bbl, bb_bbh):
