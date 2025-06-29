@@ -7,17 +7,20 @@ from datetime import datetime, timedelta
 import numpy as np
 from ta.trend import MACD, EMAIndicator, SMAIndicator
 from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volume import AccDistIndexIndicator, OnBalanceVolumeIndicator
 import requests
 import os
 from PIL import Image
 import time
 import json
-import toml
+import altair as alt
+from scipy.fft import rfft
+import pywt
 
 # Set page config
 st.set_page_config(
-    page_title="FiscalWave - AI Stock Predictor",
+    page_title="FiscalWave Pro - AI Stock Predictor",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -62,7 +65,11 @@ def to_scalar(value):
     if isinstance(value, np.ndarray):
         if value.size == 0:
             return None
-        return value.item()  # Convert to Python scalar
+        # Extract first element for 1D arrays
+        if value.ndim == 1 and value.size > 0:
+            return value[0]
+        # For multi-dimensional arrays, take first element
+        return value.flat[0]
     
     # Handle numpy scalars
     if hasattr(value, 'item'):
@@ -78,6 +85,9 @@ def safe_compare(value, op, threshold):
     """Safely compare a value to a threshold after converting to scalar"""
     try:
         scalar_value = to_scalar(value)
+        if scalar_value is None:
+            return False
+            
         if op == 'gt':
             return scalar_value > threshold
         elif op == 'lt':
@@ -145,7 +155,7 @@ def get_nifty50_performance_fallback():
 @st.cache_resource
 def load_model():
     """Load model with validation"""
-    model_path = "models/xgb_model.pkl"
+    model_path = "models/ensemble_model.pkl"  # Updated to new model
     if not os.path.exists(model_path):
         st.error(f"Model file not found at {model_path}")
         st.stop()
@@ -217,11 +227,55 @@ def engineer_features(df):
         # Lag features
         df["return_1d"] = df["Close"].pct_change()
         df["return_2d"] = df["Close"].pct_change(2)
+        df["return_3d"] = df["Close"].pct_change(3)  # New
+        df["return_5d"] = df["Close"].pct_change(5)  # New
+        df["return_10d"] = df["Close"].pct_change(10)  # New
         df["volatility_5d"] = df["Close"].rolling(window=5).std()
+        
+        # Volume-based indicators
+        df["adi"] = AccDistIndexIndicator(
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            volume=df['Volume']
+        ).acc_dist_index()
+        
+        df["obv"] = OnBalanceVolumeIndicator(
+            close=df['Close'],
+            volume=df['Volume']
+        ).on_balance_volume()
+        
+        # Volatility indicators
+        df["atr"] = AverageTrueRange(
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            window=14
+        ).average_true_range()
         
         # Additional features
         df["price_bb_diff"] = (df["Close"] - df["bb_bbl"]) / (df["bb_bbh"] - df["bb_bbl"])
         df["macd_hist"] = df["macd"] - df["macd_signal"]
+        
+        # Fourier transforms for cyclical patterns
+        if len(df) > 50:
+            try:
+                close_values = df['Close'].values
+                fft = rfft(close_values)
+                for i in range(1, 4):  # First 3 components
+                    df[f'fft_real_{i}'] = np.real(fft[i])
+                    df[f'fft_imag_{i}'] = np.imag(fft[i])
+            except:
+                pass
+        
+        # Wavelet transforms
+        if len(df) > 100:
+            try:
+                coeffs = pywt.wavedec(df['Close'], 'db4', level=3)
+                for i, coeff in enumerate(coeffs):
+                    df[f'wavelet_{i}'] = np.concatenate([coeff, np.zeros(len(df) - len(coeff))])
+            except:
+                pass
         
         df.dropna(inplace=True)
         return df
@@ -229,7 +283,7 @@ def engineer_features(df):
         st.error(f"Feature engineering failed: {str(e)}")
         return pd.DataFrame()
 
-# ========== FIXED NEWS FUNCTIONS ==========
+# ========== ENHANCED NEWS FUNCTIONS ==========
 @st.cache_data(ttl=3600, show_spinner="Fetching market news...")  # Cache for 1 hour
 def get_stock_news(stock_name):
     """Enhanced news fetching with multiple sources and fallbacks"""
@@ -240,7 +294,6 @@ def get_stock_news(stock_name):
         # Get API key from secrets - simplified approach
         api_key = None
         try:
-            # Try accessing secrets directly without section
             api_key = st.secrets.get("NEWS_API_KEY", st.secrets.get("news_api_key"))
         except Exception as e:
             st.warning(f"Secrets access issue: {str(e)}")
@@ -291,13 +344,36 @@ def format_news_date(raw_date):
     except:
         return raw_date[:10] if raw_date else "Date not available"
 
+def analyze_sentiment(text):
+    """Simple sentiment analysis (placeholder for actual model)"""
+    positive_words = ['bullish', 'growth', 'profit', 'gain', 'buy', 'strong']
+    negative_words = ['bearish', 'loss', 'sell', 'weak', 'decline', 'drop']
+    
+    if not text:
+        return 0.5  # Neutral
+    
+    text_lower = text.lower()
+    positive_count = sum(word in text_lower for word in positive_words)
+    negative_count = sum(word in text_lower for word in negative_words)
+    
+    total = positive_count + negative_count
+    if total == 0:
+        return 0.5
+    
+    return positive_count / total
+
 def render_news_section(news_result, selected_stock):
-    """Render news section with improved UI and error handling"""
+    """Render news section with sentiment analysis"""
     st.subheader(f"📰 Latest News for {selected_stock}")
     
     if news_result["status"] == "success":
         articles = news_result["articles"]
         for i, article in enumerate(articles):
+            text = f"{article.get('title', '')}. {article.get('description', '')}"
+            sentiment = analyze_sentiment(text)
+            sentiment_color = "#4CAF50" if sentiment > 0.6 else "#F44336" if sentiment < 0.4 else "#FFC107"
+            sentiment_label = "Positive" if sentiment > 0.6 else "Negative" if sentiment < 0.4 else "Neutral"
+            
             with st.expander(f"{i+1}. {article.get('title', 'No title available')}", expanded=(i==0)):
                 col1, col2 = st.columns([1, 3])
                 
@@ -310,6 +386,8 @@ def render_news_section(news_result, selected_stock):
                 with col2:
                     st.markdown(f"**Source:** {article.get('source', {}).get('name', 'Unknown')}")
                     st.markdown(f"**Published:** {format_news_date(article.get('publishedAt'))}")
+                    st.markdown(f"**Sentiment:** <span style='color:{sentiment_color}; font-weight:bold;'>{sentiment_label} ({sentiment:.2f})</span>", 
+                               unsafe_allow_html=True)
                     st.markdown(f"**Description:** {article.get('description', 'No description available')}")
                     st.markdown(f"[Read full article]({article.get('url', '#')})")
         
@@ -319,73 +397,11 @@ def render_news_section(news_result, selected_stock):
     
     elif news_result["status"] == "no_results":
         st.info("📭 No recent news articles found. Try again later.")
-        st.markdown("""
-        <div style="background-color:#e8f4f8; padding:15px; border-radius:10px; margin-top:20px;">
-            <h4>💡 Why no news?</h4>
-            <ul>
-                <li>Market closed hours may limit news availability</li>
-                <li>Try a larger, more active company</li>
-                <li>News API might be temporarily unavailable</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
     
     else:  # Error case
         st.error(f"❌ {news_result['message']}")
-        
-        # Improved instructions with TOML examples
-        st.markdown("""
-        <div style="background-color:#fce8e6; padding:15px; border-radius:10px; margin-top:20px;">
-            <h4>🔑 API Key Setup Instructions</h4>
-            <p>To enable news features:</p>
-            
-            <h5>Option 1: Simple Format (Recommended)</h5>
-            <p>Create a <code>secrets.toml</code> file with just your key:</p>
-            <pre style="background:#f0f0f0;padding:10px;border-radius:5px;">
-NEWS_API_KEY = "your_api_key_here"</pre>
-            
-            <h5>Option 2: Section Format</h5>
-            <p>If you prefer sections, use this format:</p>
-            <pre style="background:#f0f0f0;padding:10px;border-radius:5px;">
-[secrets]
-NEWS_API_KEY = "your_api_key_here"</pre>
-            
-            <p>Valid paths for secrets.toml:</p>
-            <ul>
-                <li><code>/home/vscode/.streamlit/secrets.toml</code></li>
-                <li><code>/workspaces/blank-app/.streamlit/secrets.toml</code></li>
-                <li><code>~/.streamlit/secrets.toml</code> (for local environments)</li>
-            </ul>
-            
-            <p>Get a free API key from <a href="https://newsapi.org/register" target="_blank">NewsAPI.org</a></p>
-            
-            <h5>Common Fixes:</h5>
-            <ul>
-                <li>Remove any extra spaces before keys</li>
-                <li>Ensure quotes are straight quotes (") not curly quotes</li>
-                <li>Don't include brackets or special characters in the key</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # TOML validation helper
-        with st.expander("Validate your TOML syntax"):
-            st.write("Paste your secrets.toml content here to validate:")
-            toml_content = st.text_area("TOML Content", height=150)
-            
-            if st.button("Validate Syntax"):
-                try:
-                    parsed = toml.loads(toml_content)
-                    valid_keys = [k for k in parsed.keys() if k in ["secrets", "NEWS_API_KEY", "news_api_key"]]
-                    if valid_keys:
-                        st.success("✅ Valid TOML syntax!")
-                        st.json(parsed)
-                    else:
-                        st.warning("⚠️ Syntax is valid but no recognized keys found")
-                except Exception as e:
-                    st.error(f"❌ Invalid TOML: {str(e)}")
 
-# ========== ENHANCED HISTORICAL DATA ==========
+# ========== HISTORICAL DATA ==========
 def render_historical_data(df, selected_stock):
     """Render historical data section with interactive features"""
     st.subheader("📊 Historical Price Data")
@@ -525,9 +541,8 @@ def render_historical_data(df, selected_stock):
             mime="application/json"
         )
 		
-# ========== END OF ENHANCED SECTIONS ==========
-
-def get_technical_insight(rsi, macd_hist, price, bb_bbl, bb_bbh):
+# ========== TECHNICAL ANALYSIS ==========
+def get_technical_insight(rsi, macd_hist, price, bb_bbl, bb_bbh, adi, obv):
     """Generate technical insights with enhanced safety checks"""
     insights = []
     
@@ -538,6 +553,8 @@ def get_technical_insight(rsi, macd_hist, price, bb_bbl, bb_bbh):
         price = to_scalar(price)
         bb_bbl = to_scalar(bb_bbl)
         bb_bbh = to_scalar(bb_bbh)
+        adi = to_scalar(adi)
+        obv = to_scalar(obv)
         
         # RSI Insights
         if rsi is not None:
@@ -559,6 +576,13 @@ def get_technical_insight(rsi, macd_hist, price, bb_bbl, bb_bbh):
                 insights.append("Price below Lower Bollinger Band (Oversold)")
             elif price > bb_bbh:
                 insights.append("Price above Upper Bollinger Band (Overbought)")
+        
+        # Volume Insights
+        if adi is not None and adi > 0:
+            insights.append("Accumulation/Distribution trending up")
+        
+        if obv is not None and obv > 0:
+            insights.append("On-Balance Volume positive")
                 
     except Exception as e:
         print(f"Insight generation error: {str(e)}")
@@ -574,6 +598,31 @@ def safe_format(value, format_str=".2f", default="N/A"):
         return format(float(scalar_value), format_str)
     except (TypeError, ValueError):
         return default
+
+def detect_market_regime(df):
+    """Detect market regime using clustering"""
+    from sklearn.cluster import KMeans
+    
+    if len(df) < 30:
+        return "Normal"
+    
+    features = df[['volatility_5d', 'return_1d', 'Volume']].dropna().tail(30)
+    
+    if len(features) < 10:
+        return "Normal"
+    
+    kmeans = KMeans(n_clusters=3, random_state=42)
+    features['regime'] = kmeans.fit_predict(features)
+    
+    # Map to human-readable labels
+    regime_map = {
+        0: "Low Volatility",
+        1: "High Volatility",
+        2: "Trending"
+    }
+    
+    latest_regime = features['regime'].iloc[-1]
+    return regime_map.get(latest_regime, "Normal")
 
 def create_performance_marquee(performance_data):
     """Create animated marquee content for all 50 tickers"""
@@ -698,7 +747,7 @@ def render_header(performance_data):
                 </style>
 
                 <h2 class='animated-gradient' style='text-align: center; margin-top: 0; margin-bottom: 0;'>
-                    FiscalWave: AI-Powered Nifty 50 Price Predictor
+                    FiscalWave Pro: AI-Powered Stock Predictor
                 </h2>
                 """,
                 unsafe_allow_html=True
@@ -732,32 +781,37 @@ def render_header(performance_data):
     # Add spacing
     st.write("")
 
-def render_prediction_ui(pred, confidence):
-    """Render prediction result UI with proper boolean handling"""
+def render_prediction_ui(pred, confidence, uncertainty=None):
+    """Render prediction result UI with uncertainty"""
     try:
-        # Convert to native boolean type
-        scalar_pred = to_scalar(pred)
-        bool_pred = bool(scalar_pred)
-        
-        if bool_pred:
+        # Simple boolean check
+        if pred:
+            confidence_display = f"{confidence:.1f}%" if confidence is not None else "N/A"
+            if uncertainty is not None:
+                confidence_display += f" ±{uncertainty:.1f}%"
+                
             st.markdown(
                 f"<div class='prediction-up'>"
                 f"<h2>📈 BUY Recommendation</h2>"
-                f"<h3>Confidence: {confidence:.1f}%</h3>"
+                f"<h3>Confidence: {confidence_display}</h3>"
                 f"</div>", 
                 unsafe_allow_html=True
             )
         else:
+            confidence_display = f"{confidence:.1f}%" if confidence is not None else "N/A"
+            if uncertainty is not None:
+                confidence_display += f" ±{uncertainty:.1f}%"
+                
             st.markdown(
                 f"<div class='prediction-down'>"
                 f"<h2>📉 SELL Recommendation</h2>"
-                f"<h3>Confidence: {confidence:.1f}%</h3>"
+                f"<h3>Confidence: {confidence_display}</h3>"
                 f"</div>", 
                 unsafe_allow_html=True
             )
     except Exception as e:
         st.error(f"Could not render prediction: {str(e)}")
-		
+
 def render_technical_metrics(latest):
     """Render technical metric cards"""
     st.subheader("Key Technical Metrics")
@@ -776,96 +830,28 @@ def render_technical_metrics(latest):
         """, unsafe_allow_html=True)
     
     with metric_col2:
-        macd_value = to_scalar(latest.get('macd', None))
-        macd_hist_value = to_scalar(latest.get('macd_hist', None))
-        macd_display = safe_format(macd_value, '.4f')
-        sentiment = 'Bullish' if safe_compare(macd_hist_value, 'gt', 0) else 'Bearish'
+        adi_value = to_scalar(latest.get('adi', None))
+        adi_display = safe_format(adi_value, '.2f')
+        trend = 'Up' if safe_compare(adi_value, 'gt', 0) else 'Down' if safe_compare(adi_value, 'lt', 0) else 'Neutral'
         st.markdown(f"""
-        <div class='metric-card macd-card'>
-            <h4>MACD</h4>
-            <h3>{macd_display}</h3>
-            <p>{sentiment}</p>
+        <div class='metric-card adi-card'>
+            <h4>Accumulation/Dist</h4>
+            <h3>{adi_display}</h3>
+            <p>{trend}</p>
         </div>
         """, unsafe_allow_html=True)
     
     with metric_col3:
-        try:
-            close = to_scalar(latest.get('Close'))
-            bb_bbl = to_scalar(latest.get('bb_bbl'))
-            bb_bbh = to_scalar(latest.get('bb_bbh'))
-            
-            # Check for valid values before calculation
-            if None not in (close, bb_bbl, bb_bbh) and (bb_bbh - bb_bbl) != 0:
-                bb_position = ((close - bb_bbl) / (bb_bbh - bb_bbl)) * 100
-                position = 'Upper Band' if bb_position > 95 else 'Lower Band' if bb_position < 5 else 'Middle Range'
-            else:
-                bb_position = None
-                position = 'N/A'
-                
-            # Format display values
-            bb_position_display = safe_format(bb_position, '.1f')
-            
-            st.markdown(f"""
-            <div class='metric-card bb-card'>
-                <h4>Bollinger Bands</h4>
-                <h3>{bb_position_display}%</h3>
-                <p>{position}</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        except Exception as e:
-            print(f"Bollinger Band error: {str(e)}")
-            st.markdown(f"""
-            <div class='metric-card bb-card'>
-                <h4>Bollinger Bands</h4>
-                <h3>N/A</h3>
-                <p>Error</p>
-            </div>
-            """, unsafe_allow_html=True)
-
-def render_technical_charts(df, df_features, stock_name):
-    """Render technical charts with improved styling"""
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), 
-                                       gridspec_kw={'height_ratios': [3, 1, 1]})
-    
-    # Price chart with Bollinger Bands
-    ax1.plot(df.index, df["Close"], label="Price", color='#1f77b4', linewidth=2)
-    ax1.plot(df_features.index, df_features["bb_bbh"], label="Upper BB", 
-            color='#d62728', alpha=0.7, linestyle='--')
-    ax1.plot(df_features.index, df_features["bb_bbl"], label="Lower BB", 
-            color='#2ca02c', alpha=0.7, linestyle='--')
-    ax1.fill_between(df_features.index, df_features["bb_bbl"], df_features["bb_bbh"], 
-                    color='#e0e0e0', alpha=0.2)
-    ax1.set_title(f"{stock_name} Price with Bollinger Bands", fontsize=14, fontweight='bold')
-    ax1.set_ylabel("Price", fontsize=12)
-    ax1.legend(loc='upper left', frameon=False)
-    ax1.grid(True, linestyle='--', alpha=0.7)
-    ax1.tick_params(axis='x', rotation=45)
-    
-    # MACD
-    ax2.plot(df_features.index, df_features["macd"], label="MACD", color='#ff7f0e')
-    ax2.plot(df_features.index, df_features["macd_signal"], label="Signal", color='#17becf')
-    ax2.bar(df_features.index, df_features["macd_hist"], 
-           label="Histogram", color=np.where(df_features["macd_hist"] > 0, '#2ca02c', '#d62728'), alpha=0.7)
-    ax2.axhline(0, color='black', linestyle='-', alpha=0.3)
-    ax2.set_title("MACD Indicator", fontsize=14, fontweight='bold')
-    ax2.set_ylabel("MACD", fontsize=12)
-    ax2.legend(loc='upper left', frameon=False)
-    ax2.grid(True, linestyle='--', alpha=0.7)
-    ax2.tick_params(axis='x', rotation=45)
-    
-    # RSI
-    ax3.plot(df_features.index, df_features["rsi"], label="RSI", color='#9467bd')
-    ax3.axhline(30, color='#d62728', linestyle='--', alpha=0.7)
-    ax3.axhline(70, color='#d62728', linestyle='--', alpha=0.7)
-    ax3.fill_between(df_features.index, 30, 70, color='#2ca02c', alpha=0.1)
-    ax3.set_title("RSI Indicator", fontsize=14, fontweight='bold')
-    ax3.set_ylabel("RSI", fontsize=12)
-    ax3.grid(True, linestyle='--', alpha=0.7)
-    ax3.tick_params(axis='x', rotation=45)
-    
-    plt.tight_layout()
-    return fig
+        atr_value = to_scalar(latest.get('atr', None))
+        atr_display = safe_format(atr_value, '.2f')
+        volatility = 'High' if safe_compare(atr_value, 'gt', 0.05) else 'Low' if safe_compare(atr_value, 'lt', 0.01) else 'Moderate'
+        st.markdown(f"""
+        <div class='metric-card atr-card'>
+            <h4>ATR (Volatility)</h4>
+            <h3>{atr_display}</h3>
+            <p>{volatility}</p>
+        </div>
+        """, unsafe_allow_html=True)
 
 # ---------- MAIN APPLICATION ----------
 def main():
@@ -926,12 +912,12 @@ def main():
             border-top: 4px solid #FF6666;
         }
         
-        .macd-card {
-            border-top: 4px solid #66FF66;
+        .adi-card {
+            border-top: 4px solid #2196F3;
         }
         
-        .bb-card {
-            border-top: 4px solid #007BFF;
+        .atr-card {
+            border-top: 4px solid #9C27B0;
         }
         
         /* Ticker styling */
@@ -1052,16 +1038,40 @@ def main():
         latest = df_features.iloc[-1]
         X = df_features[feature_cols].tail(1)
         
-        # Make prediction
+        # Detect market regime
+        market_regime = detect_market_regime(df_features)
+        st.markdown(f"**Market Regime:** <span style='color:#2196F3;'>{market_regime}</span>", unsafe_allow_html=True)
+        
+        # Make prediction - FIXED SECTION
         with st.spinner("Analyzing market patterns..."):
-            # Get raw predictions
-            pred_proba = model.predict_proba(X)  # This returns a 2D array (1 sample, n_classes)
-            pred_class = model.predict(X)         # This returns a 1D array (1 sample)
+            # Get raw prediction value
+            pred_value = model.predict(X)[0]
             
-            # Convert to scalar values
-            confidence = float(np.max(pred_proba[0])) * 100
-            pred_value = to_scalar(pred_class[0])
-            pred = bool(pred_value)
+            # Convert to scalar and boolean
+            pred_scalar = to_scalar(pred_value)
+            bool_pred = bool(pred_scalar)
+            
+            # Get confidence value
+            confidence_val = None
+            if hasattr(model, 'predict_proba'):
+                pred_proba = model.predict_proba(X)
+                confidence_val = float(np.max(pred_proba[0])) * 100
+            
+            # Get uncertainty value
+            uncertainty_val = None
+            if hasattr(model, 'estimators_'):
+                predictions = []
+                for estimator in model.estimators_:
+                    if hasattr(estimator, 'predict_proba'):
+                        pred = estimator.predict_proba(X)
+                        predictions.append(pred)
+                if predictions:
+                    predictions_array = np.array(predictions)
+                    std_pred = np.std(predictions_array, axis=0)
+                    uncertainty_val = float(std_pred[0][0]) * 100
+        
+            # Render prediction
+            render_prediction_ui(bool_pred, confidence_val, uncertainty_val)
         
         # Get technical insights
         insights = get_technical_insight(
@@ -1069,23 +1079,22 @@ def main():
             latest.get('macd_hist', None),
             latest.get('Close', None),
             latest.get('bb_bbl', None),
-            latest.get('bb_bbh', None)
+            latest.get('bb_bbh', None),
+            latest.get('adi', None),
+            latest.get('obv', None)
         )
         
         # Main layout
         col1, col2 = st.columns([1, 1])
         
         with col1:
-            # Prediction display
-            render_prediction_ui(pred, confidence)
-            
             # Technical insights
             if insights:
                 st.subheader("Technical Insights")
                 for insight in insights:
-                    if "Bullish" in insight or "Oversold" in insight:
+                    if "Bullish" in insight or "Oversold" in insight or "Up" in insight:
                         st.success(f"✅ {insight}")
-                    elif "Bearish" in insight or "Overbought" in insight:
+                    elif "Bearish" in insight or "Overbought" in insight or "Down" in insight:
                         st.warning(f"⚠️ {insight}")
                     else:
                         st.info(f"ℹ️ {insight}")
@@ -1106,9 +1115,9 @@ def main():
                          delta_color="inverse")
             
             with col_perf2:
-                return_2d = to_scalar(latest.get('return_2d', None))
-                st.metric("2D Return", 
-                         f"{safe_format(return_2d*100, '.2f')}%" if return_2d is not None else "N/A",
+                return_5d = to_scalar(latest.get('return_5d', None))
+                st.metric("5D Return", 
+                         f"{safe_format(return_5d*100, '.2f')}%" if return_5d is not None else "N/A",
                          delta_color="inverse")
             
             with col_perf3:
@@ -1131,10 +1140,48 @@ def main():
         with col2:
             # Visualization
             with st.spinner("Generating charts..."):
-                fig = render_technical_charts(df, df_features, selected_stock)
+                fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), 
+                                                   gridspec_kw={'height_ratios': [3, 1, 1]})
+                
+                # Price chart with Bollinger Bands
+                ax1.plot(df.index, df["Close"], label="Price", color='#1f77b4', linewidth=2)
+                ax1.plot(df_features.index, df_features["bb_bbh"], label="Upper BB", 
+                        color='#d62728', alpha=0.7, linestyle='--')
+                ax1.plot(df_features.index, df_features["bb_bbl"], label="Lower BB", 
+                        color='#2ca02c', alpha=0.7, linestyle='--')
+                ax1.fill_between(df_features.index, df_features["bb_bbl"], df_features["bb_bbh"], 
+                                color='#e0e0e0', alpha=0.2)
+                ax1.set_title(f"{selected_stock} Price with Bollinger Bands", fontsize=14, fontweight='bold')
+                ax1.set_ylabel("Price", fontsize=12)
+                ax1.legend(loc='upper left', frameon=False)
+                ax1.grid(True, linestyle='--', alpha=0.7)
+                ax1.tick_params(axis='x', rotation=45)
+                
+                # MACD
+                ax2.plot(df_features.index, df_features["macd"], label="MACD", color='#ff7f0e')
+                ax2.plot(df_features.index, df_features["macd_signal"], label="Signal", color='#17becf')
+                ax2.bar(df_features.index, df_features["macd_hist"], 
+                       label="Histogram", color=np.where(df_features["macd_hist"] > 0, '#2ca02c', '#d62728'), alpha=0.7)
+                ax2.axhline(0, color='black', linestyle='-', alpha=0.3)
+                ax2.set_title("MACD Indicator", fontsize=14, fontweight='bold')
+                ax2.set_ylabel("MACD", fontsize=12)
+                ax2.legend(loc='upper left', frameon=False)
+                ax2.grid(True, linestyle='--', alpha=0.7)
+                ax2.tick_params(axis='x', rotation=45)
+                
+                # Volume Indicators
+                ax3.plot(df_features.index, df_features["adi"], label="Accumulation/Dist", color='#9467bd')
+                ax3.plot(df_features.index, df_features["obv"], label="OBV", color='#8c564b')
+                ax3.set_title("Volume Indicators", fontsize=14, fontweight='bold')
+                ax3.set_ylabel("Value", fontsize=12)
+                ax3.grid(True, linestyle='--', alpha=0.7)
+                ax3.tick_params(axis='x', rotation=45)
+                ax3.legend(loc='upper left', frameon=False)
+                
+                plt.tight_layout()
                 st.pyplot(fig)
         
-        # Tabs for additional information - FIXED SECTION
+        # Tabs for additional information
         tab1, tab2, tab3 = st.tabs(["Technical Details", "Market News", "Historical Data"])
         
         with tab1:
@@ -1142,23 +1189,6 @@ def main():
             formatted_df = X.T.applymap(lambda x: safe_format(x, '.4f'))
             st.dataframe(formatted_df, height=400)
             
-            st.subheader("Technical Summary")
-            st.write(f"Current RSI: {safe_format(latest.get('rsi'), '.2f')} - "
-                    f"{'Overbought' if safe_compare(latest.get('rsi'), 'gt', 70) else 'Oversold' if safe_compare(latest.get('rsi'), 'lt', 30) else 'Neutral'}")
-            st.write(f"MACD Histogram: {safe_format(latest.get('macd_hist'), '.4f')} - "
-                    f"{'Bullish' if safe_compare(latest.get('macd_hist'), 'gt', 0) else 'Bearish'}")
-            try:
-                close = to_scalar(latest.get('Close'))
-                bb_bbl = to_scalar(latest.get('bb_bbl'))
-                bb_bbh = to_scalar(latest.get('bb_bbh'))
-                if all(x is not None for x in [close, bb_bbl, bb_bbh]) and (bb_bbh - bb_bbl) != 0:
-                    bb_pos = ((close - bb_bbl) / (bb_bbh - bb_bbl)) * 100
-                    st.write(f"Price position in Bollinger Bands: {safe_format(bb_pos, '.1f')}%")
-                else:
-                    st.write("Price position in Bollinger Bands: N/A")
-            except (ZeroDivisionError, KeyError, TypeError):
-                st.write("Price position in Bollinger Bands: N/A")
-        
         with tab2:
             # Get market news
             news_result = get_stock_news(selected_stock)
