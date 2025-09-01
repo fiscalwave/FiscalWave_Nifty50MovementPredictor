@@ -1,1 +1,15 @@
 streamlit
+pandas
+yfinance
+joblib
+matplotlib
+numpy
+scikit-learn
+xgboost
+tqdm
+ta
+requests
+Pillow
+altair
+scipy
+pywavelets
