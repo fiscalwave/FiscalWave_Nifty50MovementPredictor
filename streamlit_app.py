@@ -24,10 +24,7 @@ st.write("")
 st.write("")
 st.write("")
 st.write("")
-st.write("")
-st.write("")
-st.write("")
-st.write("")
+
 
 # Set page config
 st.set_page_config(
