@@ -752,8 +752,8 @@ def render_header(performance_data):
                 </style>
 
                 <h2 class='animated-gradient'>
-                    <span style="font-size:44px;">FiscalWave Pro</span><br>
-                    <span style="font-size:34px; font-weight:normal;">
+                    <span style="font-size:45px;">FiscalWave Pro</span><br>
+                    <span style="font-size:31px; font-weight:normal;">
                         AI-Powered Stock Predictor
                     </span>
                 </h2>
