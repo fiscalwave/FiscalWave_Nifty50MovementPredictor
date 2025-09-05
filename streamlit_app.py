@@ -18,6 +18,17 @@ import altair as alt
 from scipy.fft import rfft
 import pywt
 
+# After deploying to Streamlit issues related to Title & logo not displying correctly
+# So to resolve it we have streamlit related function.it will add new line.
+st.write("")
+st.write("")
+st.write("")
+st.write("")
+st.write("")
+st.write("")
+st.write("")
+st.write("")
+
 # Set page config
 st.set_page_config(
     page_title="FiscalWave Pro - AI Stock Predictor",
@@ -25,6 +36,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
 
 # ---------- CONSTANTS ----------
 NIFTY50_TICKERS = [
