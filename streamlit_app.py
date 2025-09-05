@@ -23,6 +23,14 @@ import pywt
 st.write("")
 st.write("")
 
+# Set page config
+st.set_page_config(
+    page_title="FiscalWave Pro - AI Stock Predictor",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 # ---------- CONSTANTS ----------
 NIFTY50_TICKERS = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "HINDUNILVR.NS",
