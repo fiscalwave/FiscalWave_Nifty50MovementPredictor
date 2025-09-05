@@ -22,18 +22,6 @@ import pywt
 # So to resolve it we have streamlit related function.it will add new line.
 st.write("")
 st.write("")
-st.write("")
-st.write("")
-
-
-# Set page config
-st.set_page_config(
-    page_title="FiscalWave Pro - AI Stock Predictor",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
 
 # ---------- CONSTANTS ----------
 NIFTY50_TICKERS = [
