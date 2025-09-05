@@ -31,6 +31,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
+
 # ---------- CONSTANTS ----------
 NIFTY50_TICKERS = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "HINDUNILVR.NS",
@@ -752,7 +754,7 @@ def render_header(performance_data):
                 </style>
 
                 <h2 class='animated-gradient' style='text-align: center; margin-top: 0; margin-bottom: 0;'>
-                    FiscalWave Pro: AI-Powered Stock Predictor
+                    FiscalWave : AI Stock Predictor
                 </h2>
                 """,
                 unsafe_allow_html=True
