@@ -715,21 +715,20 @@ def render_header(performance_data):
     """Render application header with logo, ticker, and performance sections"""
     logo = load_logo()
     marquee_content = create_performance_marquee(performance_data)
-    
+
     # Create a container for the header
     header_container = st.container()
-    
+
     with header_container:
-        # New row: Logo and Title
-        col_title, col_logo = st.columns([4, 1])
-        
-        with col_title:
-            # Moved title to this position
+        # ---------- TITLE + LOGO (Responsive with columns) ----------
+        col1, col2 = st.columns([4, 1])  # Wider space for title, smaller for logo
+
+        with col1:
             st.markdown(
                 """
                 <style>
                 .animated-gradient {
-                    font-size: 30px;
+                    font-size: 28px;
                     font-weight: bold;
                     background: linear-gradient(
                         270deg,
@@ -743,7 +742,6 @@ def render_header(performance_data):
                     -webkit-background-clip: text;
                     -webkit-text-fill-color: transparent;
                     animation: gradientMove 5s ease infinite;
-                    white-space: nowrap;
                 }
 
                 @keyframes gradientMove {
@@ -753,20 +751,20 @@ def render_header(performance_data):
                 }
                 </style>
 
-                <h2 class='animated-gradient' style='text-align: center; margin-top: 0; margin-bottom: 0;'>
-                    FiscalWave : AI Stock Predictor
+                <h2 class='animated-gradient'>
+                    FiscalWave Pro: AI Stock Predictor
                 </h2>
                 """,
                 unsafe_allow_html=True
             )
-        
-        with col_logo:
+
+        with col2:
             if logo:
-                st.image(logo, width=150)
+                st.image(logo, width=90)  # Keep logo small for mobile
             else:
                 st.empty()
-        
-        # Marquee row (below title and logo)
+
+        # ---------- SCROLLING MARQUEE ----------
         st.markdown(
             f"""
             <div style="width: 100%; overflow: hidden; white-space: nowrap; margin-top: 10px;">
@@ -777,16 +775,17 @@ def render_header(performance_data):
             """,
             unsafe_allow_html=True
         )
-    
+
     # Add spacing
     st.write("")
-    
+
     # Add Top Gainers and Losers sections BELOW the header
     top_gainers, top_losers = create_top_performers(performance_data)
     render_performance_sections(top_gainers, top_losers)
-    
+
     # Add spacing
     st.write("")
+
 
 def render_prediction_ui(pred, confidence, uncertainty=None):
     """Render prediction result UI with uncertainty"""
