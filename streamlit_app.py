@@ -752,7 +752,7 @@ def render_header(performance_data):
                 </style>
 
                 <h2 class='animated-gradient'>
-                    FiscalWave Pro: AI Stock Predictor
+                    FiscalWave Pro: AI-Powered Stock Predictor
                 </h2>
                 """,
                 unsafe_allow_html=True
