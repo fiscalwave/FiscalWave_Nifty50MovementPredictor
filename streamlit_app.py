@@ -761,18 +761,11 @@ def render_header(performance_data):
                 unsafe_allow_html=True
             )
 
-            with col2:
-                if logo:
-                    st.markdown(
-                        f"""
-                        <div style="text-align: right; width: 100%;">
-                            <img src="data:image/png;base64,{logo}" width="90" style="max-width:100%; display:block; margin:auto;">
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-                else:
-                    st.empty()
+        with col2:
+            if logo:
+                st.image(logo, width=90)  # Keep logo small for mobile
+            else:
+                st.empty()
 
         # ---------- SCROLLING MARQUEE ----------
         st.markdown(
